@@ -1,0 +1,15 @@
+# PlatformIO build directory and VS Code settings
+.pio
+.vscode
+
+# Local configuration containing sensitive WiFi credentials
+data/config.json
+
+# Compilation artifacts
+*.o
+*.a
+*.elf
+*.bin
+
+# System files
+.DS_Store

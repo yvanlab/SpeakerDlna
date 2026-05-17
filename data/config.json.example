@@ -1,0 +1,37 @@
+{
+  "wifi": {
+    "ssid": "YOUR_WIFI_SSID",
+    "password": "YOUR_WIFI_PASSWORD",
+    "hostname": "esp32-speaker",
+    "timeout_ms": 20000
+  },
+  "device": {
+    "name": "ESP32-Speaker",
+    "model": "ESP32-HEOS-DLNA-BT",
+    "location": "Living Room"
+  },
+  "audio": {
+    "sample_rate": 44100,
+    "bits_per_sample": 16,
+    "i2s": {
+      "bclk_pin": 26,
+      "lrc_pin": 25,
+      "dout_pin": 22
+    },
+    "default_volume": 50
+  },
+  "protocols": {
+    "bluetooth": {
+      "enabled": true
+    },
+    "dlna": {
+      "enabled": true,
+      "port": 8080
+    },
+    "heos": {
+      "enabled": true,
+      "command_port": 1255,
+      "stream_port": 8081
+    }
+  }
+}
