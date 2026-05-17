@@ -21,8 +21,8 @@ bool ConfigManager::begin() {
 bool ConfigManager::loadDefaults() {
     // WiFi defaults
  
-    wifiConfig.ssid = "freebox";
-    wifiConfig.password = "10970884LABRITYL";
+    wifiConfig.ssid = "YOUR_WIFI_SSID";
+    wifiConfig.password = "YOUR_WIFI_PASSWORD";
     wifiConfig.hostname = "esp32-speaker";
     wifiConfig.timeout_ms = 20000;
 
