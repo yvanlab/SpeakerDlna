@@ -18,8 +18,8 @@
 // Redundant definitions from config.h to address "not declared in this scope" errors.
 // This is likely a build system issue (e.g., stale cache or incorrect include paths)
 // as config.h is already included. This is a workaround to allow compilation.
-#define TEST_SINE_FREQ    440.0f  // Frequency in Hz (440Hz is A4 note)
-#define TEST_SINE_VOLUME  0.10f   // Volume level (0.0 to 1.0)
+#define TEST_SINE_FREQ    1000.0f // 1kHz is much easier to hear for testing
+#define TEST_SINE_VOLUME  0.90f   // Near-maximum volume for testing
 #define TEST_FM_MOD_FREQ  5.0f    // Speed of frequency change (Hz)
 #define TEST_FM_DEVIATION 50.0f   // Range of frequency swing (Hz)
 #define TEST_DURATION_MS  5000    // Duration of test in milliseconds
@@ -35,6 +35,9 @@ HEOSPlayer* heosPlayer = nullptr;
 
 bool wifiConnected = false;
 unsigned long lastStatusPrint = 0;
+
+// Task handle for background audio processing
+TaskHandle_t audioTaskHandle = NULL;
 
 void setupWiFi(const WiFiConfig& wifiConfig) {
     Serial.println("\n=== WiFi Setup ===");
@@ -116,9 +119,22 @@ void printStatus() {
     Serial.println("==============\n");
 }
 
+// Background task to handle audio decoding without blocking the main loop
+void audioTask(void* pvParameters) {
+    for (;;) {
+        if (audioStreamer) {
+            audioStreamer->loop();
+        }
+        // Yield slightly to let other tasks/WiFi run
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
 void setup() {
     // Initialize Serial
     Serial.begin(115200);
+    randomSeed(micros());
+    
     delay(1000);
 
     Serial.println("\n\n");
@@ -199,7 +215,19 @@ void setup() {
         audioStreamer = nullptr;
     }
 
-    
+    // Start the background audio task on Core 1 (Application core)
+    // Priority 5 is higher than the main loop (1) but allows system tasks to run.
+    // Core 1 is used for application tasks, leaving Core 0 for WiFi/Bluetooth.
+    xTaskCreatePinnedToCore(
+        audioTask,        // Function to run
+        "AudioTask",      // Name
+        8192,             // Stack size (bytes)
+        NULL,             // Parameter to pass to function
+        5,                // Priority (0 to configMAX_PRIORITIES - 1)
+        &audioTaskHandle, // Task handle
+        1                 // Core 1
+    );
+
 
     // Initialize Bluetooth Speaker
     if (protocolConfig.bluetooth_enabled) {
@@ -255,6 +283,8 @@ void setup() {
             delete heosPlayer;
             heosPlayer = nullptr;
         }
+        
+        if (audioTaskHandle) vTaskResume(audioTaskHandle);
     } else if (!wifiConnected) {
         Serial.println("\n=== HEOS Skipped (No WiFi) ===");
     } else if (!audioStreamer) {
@@ -275,11 +305,6 @@ void setup() {
 }
 
 void loop() {
-    // Handle Audio Streamer
-    if (audioStreamer) {
-        audioStreamer->loop();
-    }
-
     // Handle DLNA requests
     if (dlnaRenderer) {
         dlnaRenderer->handle();
@@ -308,6 +333,11 @@ void loop() {
         char cmd = Serial.read();
         if (cmd == 'f' || cmd == 'F') {
             Serial.println("\n[TEST] Starting FM Tone (Vibrato) via DAC...");
+            
+            // Stop background streaming to prevent I2S conflict
+            if (audioTaskHandle) vTaskSuspend(audioTaskHandle);
+            if (audioStreamer) audioStreamer->stopStream();
+
             Serial.printf("Base: %.1fHz, Mod: %.1fHz, Dev: %.1fHz\n", 
                           TEST_SINE_FREQ, TEST_FM_MOD_FREQ, TEST_FM_DEVIATION);
             
@@ -340,6 +370,24 @@ void loop() {
                 yield(); // Prevent watchdog reset and handle background tasks
             }
             Serial.println("[TEST] FM Tone complete. Resuming services.");
+            if (audioTaskHandle) vTaskResume(audioTaskHandle);
+        } 
+        else if (cmd == '+') {
+            uint8_t current = audioOutput.getVolume();
+            uint8_t next = (current >= 95) ? 100 : current + 5;
+            audioOutput.setVolume(next);
+            Serial.printf("[AUDIO] Volume UP: %d%%\n", next);
+        } 
+        else if (cmd == '-') {
+            uint8_t current = audioOutput.getVolume();
+            uint8_t next = (current <= 5) ? 0 : current - 5;
+            audioOutput.setVolume(next);
+            Serial.printf("[AUDIO] Volume DOWN: %d%%\n", next);
+        }
+        else if (cmd == 'v' || cmd == 'V') {
+            // Emergency volume reset to 70%
+            audioOutput.setVolume(70);
+            Serial.println("[AUDIO] Emergency volume reset to 70%");
         }
     }
 

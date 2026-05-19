@@ -14,6 +14,7 @@ DLNARenderer::DLNARenderer(I2SAudioOutput& audioOut, AudioStreamer& streamer)
     deviceUUID = "uuid:12345678-1234-1234-1234-" + mac;
     currentURI = "";
     awaitingURI = false;
+    bootId = millis() / 1000;
 }
 
 DLNARenderer::~DLNARenderer() {
@@ -37,15 +38,17 @@ bool DLNARenderer::begin(const char* name, const char* model, uint16_t port) {
     // Enable header collection for SOAP processing
     const char* headerkeys[] = {"SOAPACTION", "Callback", "SID", "Timeout", "Content-Type", "Content-Length", 
                                 "Expect", "User-Agent", "Host", "X-CurrentURI", "X-AV-URI", "X-URI", "X-Uri",
-                                "URI", "URL", "X-AV-URL", "X-Target-URI"};
-    httpServer->collectHeaders(headerkeys, 17);
+                                "URI", "URL", "X-AV-URL", "X-Target-URI", "Accept-Encoding"};
+    httpServer->collectHeaders(headerkeys, sizeof(headerkeys) / sizeof(char*));
 
     // Register HTTP handlers
     httpServer->on("/description.xml", [this]() { handleDescription(); });
     httpServer->on("/avt/control", HTTP_POST, [this]() { handleAVTransportControl(); });
     httpServer->on("/rc/control", HTTP_POST, [this]() { handleRenderingControl(); });
+    httpServer->on("/cm/control", HTTP_POST, [this]() { handleConnectionManagerControl(); });
     httpServer->on("/avt/scpd.xml", [this]() { handleAVTransportSCPD(); });
     httpServer->on("/rc/scpd.xml", [this]() { handleRenderingControlSCPD(); });
+    httpServer->on("/cm/scpd.xml", [this]() { handleConnectionManagerSCPD(); });
     
     // Standard routes usually only match GET/POST. Custom UPnP methods (SUBSCRIBE/UNSUBSCRIBE)
     // are often Method 6 and 7, which are handled in onNotFound as a fallback.
@@ -134,7 +137,7 @@ void DLNARenderer::handleSSDP() {
     int packetSize = ssdpSocket.parsePacket();
     if (packetSize > 0) {
         Serial.printf("[SSDP] Packet received: %d bytes\n", packetSize);
-        char buffer[512];
+        char buffer[1024];
         int len = ssdpSocket.read(buffer, sizeof(buffer) - 1);
         if (len > 0) {
             buffer[len] = '\0';
@@ -143,36 +146,64 @@ void DLNARenderer::handleSSDP() {
             if (strstr(buffer, "M-SEARCH") != NULL) {
                 IPAddress remoteIP = ssdpSocket.remoteIP();
                 uint16_t remotePort = ssdpSocket.remotePort();
+                
+                // Extract Search Target (ST) header robustly (handle 'ST:' or 'st:')
+                char* stStart = strcasestr(buffer, "ST:");
+                String target = "";
+                if (stStart) {
+                    char* stEnd = strchr(stStart, '\r');
+                    if (stEnd) {
+                        target = String(stStart).substring(3, stEnd - stStart);
+                        target.trim();
+                        Serial.printf("[SSDP] M-SEARCH from %s:%d ST: %s\n", 
+                                      remoteIP.toString().c_str(), remotePort, target.c_str());
+                    }
+                }
 
                 // Determine what the client is looking for
-                bool searchAll = (strstr(buffer, "ST: ssdp:all") != NULL);
-                bool searchRoot = searchAll || (strstr(buffer, "ST: upnp:rootdevice") != NULL);
-                bool searchRenderer = searchAll || (strstr(buffer, "ST: urn:schemas-upnp-org:device:MediaRenderer:1") != NULL);
-                bool searchAVT = searchAll || (strstr(buffer, "ST: urn:schemas-upnp-org:service:AVTransport:1") != NULL);
-                bool searchRC = searchAll || (strstr(buffer, "ST: urn:schemas-upnp-org:service:RenderingControl:1") != NULL);
-                bool searchUUID = searchAll || (strstr(buffer, deviceUUID.c_str()) != NULL);
+                bool searchAll = target.equalsIgnoreCase("ssdp:all") || target.equals("239.255.255.250:1900");
+                bool searchRoot = searchAll || target.equalsIgnoreCase("upnp:rootdevice");
+                bool searchRenderer = searchAll || target.equalsIgnoreCase("urn:schemas-upnp-org:device:MediaRenderer:1");
+                bool searchAVT = searchAll || target.equalsIgnoreCase("urn:schemas-upnp-org:service:AVTransport:1");
+                bool searchRC = searchAll || target.equalsIgnoreCase("urn:schemas-upnp-org:service:RenderingControl:1");
+                bool searchCM = searchAll || target.equalsIgnoreCase("urn:schemas-upnp-org:service:ConnectionManager:1");
+                bool searchUUID = searchAll || target.equalsIgnoreCase(deviceUUID);
+                
+                // If it's an M-SEARCH but we didn't match anything specific yet, fallback to root device
+                if (!searchRoot && !searchRenderer && !searchAVT && !searchRC && !searchCM && !searchUUID) {
+                    searchRoot = true; 
+                }
 
-                if (searchRoot) {
-                    sendSSDPResponse(remoteIP, remotePort, "upnp:rootdevice");
-                    delay(10);
+                // Add a small random delay (0-100ms) to prevent UDP collisions 
+                // and satisfy strict timing requirements in the UPnP spec
+                delay(random(10, 100));
+
+                // If VLC specifically requested the multicast address as ST, respond with root device
+                if (searchRoot || target.equals("239.255.255.250:1900")) {
+                    const char* st = target.equals("239.255.255.250:1900") ? target.c_str() : "upnp:rootdevice";
+                    sendSSDPResponse(remoteIP, remotePort, st);
+                    delay(250); // Further increased delay for robustness
                 }
                 if (searchUUID) {
                     sendSSDPResponse(remoteIP, remotePort, deviceUUID.c_str());
-                    delay(10);
+                    delay(250); // Further increased delay
                 }
                 if (searchRenderer) {
                     sendSSDPResponse(remoteIP, remotePort, "urn:schemas-upnp-org:device:MediaRenderer:1");
-                    delay(10);
+                    delay(250); // Further increased delay
                 }
                 if (searchAVT) {
                     sendSSDPResponse(remoteIP, remotePort, "urn:schemas-upnp-org:service:AVTransport:1");
-                    delay(10);
+                    delay(250); // Further increased delay
                 }
                 if (searchRC) {
                     sendSSDPResponse(remoteIP, remotePort, "urn:schemas-upnp-org:service:RenderingControl:1");
+                    delay(250); // Further increased delay
                 }
-
-                Serial.printf("[SSDP] Responded to M-SEARCH from %s:%d\n", remoteIP.toString().c_str(), remotePort);
+                if (searchCM) {
+                    sendSSDPResponse(remoteIP, remotePort, "urn:schemas-upnp-org:service:ConnectionManager:1");
+                    delay(250); // Further increased delay
+                }
             } else {
                 // Silent ignore for NOTIFY packets from other devices to clean up logs
             }
@@ -181,18 +212,18 @@ void DLNARenderer::handleSSDP() {
 }
 
 void DLNARenderer::sendSSDPResponse(IPAddress remoteIP, uint16_t remotePort, const char* searchTarget) {
-    uint32_t bootId = millis() / 1000;
     String localIP = WiFi.localIP().toString();
 
     String response = "HTTP/1.1 200 OK\r\n";
     response += "CACHE-CONTROL: max-age=120\r\n";
     response += "EXT:\r\n";
     response += "LOCATION: http://" + localIP + ":" + String(serverPort) + "/description.xml\r\n";
-    response += "SERVER: Arduino/1.0 UPnP/1.1 ESP32-Speaker/1.0\r\n";
+    response += "SERVER: FreeRTOS/10.0 UPnP/1.1 ESP32-Speaker/1.0\r\n"; 
+    response += "DATE: Tue, 19 May 2026 20:05:00 GMT\r\n"; // Required by some strict libupnp versions
     response += "ST: " + String(searchTarget) + "\r\n";
     
     // USN must be just the UUID if the ST is the UUID, otherwise UUID::ST
-    if (deviceUUID == String(searchTarget)) {
+    if (deviceUUID == String(searchTarget) || String(searchTarget).indexOf("239.255.255.250") != -1) {
         response += "USN: " + deviceUUID + "\r\n";
     } else {
         response += "USN: " + deviceUUID + "::" + String(searchTarget) + "\r\n";
@@ -200,7 +231,6 @@ void DLNARenderer::sendSSDPResponse(IPAddress remoteIP, uint16_t remotePort, con
     
     response += "BOOTID.UPNP.ORG: " + String(bootId) + "\r\n";
     response += "CONFIGID.UPNP.ORG: 1\r\n";
-    response += "DATE: Mon, 01 Jan 2024 00:00:00 GMT\r\n";
     response += "\r\n";
 
     ssdpSocket.beginPacket(remoteIP, remotePort);
@@ -212,18 +242,17 @@ void DLNARenderer::sendSSDPResponse(IPAddress remoteIP, uint16_t remotePort, con
 }
 
 void DLNARenderer::sendSSDPNotify() {
-    uint32_t bootId = millis() / 1000;
     String localIP = WiFi.localIP().toString();
     IPAddress multicastIP(239, 255, 255, 250);
 
-    auto sendPacket = [this, &localIP, &bootId, &multicastIP](const char* nt, const char* usn) {
+    auto sendPacket = [this, &localIP, &multicastIP](const char* nt, const char* usn) {
         String notify = "NOTIFY * HTTP/1.1\r\n";
         notify += "HOST: 239.255.255.250:1900\r\n";
         notify += "CACHE-CONTROL: max-age=1800\r\n";
         notify += "LOCATION: http://" + localIP + ":" + String(serverPort) + "/description.xml\r\n";
         notify += "NT: " + String(nt) + "\r\n";
         notify += "NTS: ssdp:alive\r\n";
-        notify += "SERVER: Arduino/1.0 UPnP/1.1 ESP32-Speaker/1.0\r\n";
+        notify += "SERVER: FreeRTOS/10.0 UPnP/1.1 ESP32-Speaker/1.0\r\n"; // Standardized SERVER header
         notify += "USN: " + String(usn) + "\r\n";
         notify += "BOOTID.UPNP.ORG: " + String(bootId) + "\r\n";
         notify += "CONFIGID.UPNP.ORG: 1\r\n";
@@ -232,28 +261,33 @@ void DLNARenderer::sendSSDPNotify() {
         yield(); // Allow background WiFi tasks
         ssdpSocket.beginPacket(multicastIP, SSDP_PORT);
         ssdpSocket.write((const uint8_t*)notify.c_str(), notify.length());
-        ssdpSocket.endPacket();
+        if (!ssdpSocket.endPacket()) {
+            Serial.printf("[SSDP] Failed to send NOTIFY for %s (Queue Full)\n", nt);
+        }
     };
 
     // 1. Root device
     sendPacket("upnp:rootdevice", (deviceUUID + "::upnp:rootdevice").c_str());
-    delay(20);
+    delay(250); // Further increased delay
     
     // 2. Specific UUID
     sendPacket(deviceUUID.c_str(), deviceUUID.c_str());
-    delay(20);
+    delay(250); // Further increased delay
 
     // 3. MediaRenderer Device
     sendPacket("urn:schemas-upnp-org:device:MediaRenderer:1", 
                (deviceUUID + "::urn:schemas-upnp-org:device:MediaRenderer:1").c_str());
-    delay(20);
+    delay(250); // Further increased delay
 
     // 4. Services (Required by some strict controllers)
     sendPacket("urn:schemas-upnp-org:service:AVTransport:1", 
                (deviceUUID + "::urn:schemas-upnp-org:service:AVTransport:1").c_str());
-    delay(20);
+    delay(250); // Further increased delay
     sendPacket("urn:schemas-upnp-org:service:RenderingControl:1", 
                (deviceUUID + "::urn:schemas-upnp-org:service:RenderingControl:1").c_str());
+    delay(250); // Further increased delay
+    sendPacket("urn:schemas-upnp-org:service:ConnectionManager:1", 
+               (deviceUUID + "::urn:schemas-upnp-org:service:ConnectionManager:1").c_str());
 
     Serial.println("[SSDP] Sent full tiered NOTIFY suite");
 }
@@ -274,8 +308,10 @@ void DLNARenderer::handleEventSubscription() {
 }
 
 void DLNARenderer::handleAVTransportControl() {
+    Serial.println("\n[DLNA] >>> Incoming AVTransport Control Request");
     String soapAction = httpServer->header("SOAPACTION");
-    
+    Serial.printf("[DLNA] Action Header: %s\n", soapAction.c_str());
+
     // Retrieve the SOAP body. Check "plain" first, then fallback to raw index.
     String body = "";
     if (httpServer->hasArg("plain")) {
@@ -301,6 +337,8 @@ void DLNARenderer::handleAVTransportControl() {
         }
     }
 
+    Serial.printf("[DLNA] Full Body Received (%d bytes):\n%s\n", body.length(), body.c_str());
+
     // Robust Unescaping: Some controllers double-encode or use mixed entities
     if (body.indexOf("&lt;") != -1 || body.indexOf("&amp;") != -1) {
         body.replace("&lt;", "<");
@@ -314,15 +352,18 @@ void DLNARenderer::handleAVTransportControl() {
     int hashPos = soapAction.lastIndexOf('#');
     String actionName = (hashPos != -1) ? soapAction.substring(hashPos + 1) : "Unknown";
     actionName.replace("\"", ""); // Remove surrounding quotes
+    actionName.trim();
 
+    Serial.printf("[DLNA] Processing Action: %s\n", actionName.c_str());
     String actionResult = "";
 
-    if (actionName == "SetAVTransportURI") {
+    if (actionName.equalsIgnoreCase("SetAVTransportURI")) {
         String receivedURI = "";
         // 1. Check ALL HTTP arguments. Some controllers send parameters as POST fields.
         for (int i = 0; i < httpServer->args(); i++) {
             if (httpServer->argName(i).equalsIgnoreCase("CurrentURI")) {
                 currentURI = httpServer->arg(i);
+                Serial.printf("[DLNA] Found URI in Arguments: %s\n", currentURI.c_str());
                 break;
             }
         }
@@ -350,6 +391,9 @@ void DLNARenderer::handleAVTransportControl() {
         }
 
         if (currentURI.length() > 0) {
+            Serial.println("**************************************************");
+            Serial.printf("[DLNA] SUCCESS - URI EXTRACTED: %s\n", currentURI.c_str());
+            Serial.println("**************************************************");
             Serial.printf("[DLNA] Queued URI: %s\n", currentURI.c_str());
         } else {
             // If we couldn't get a URI, set awaiting flag so a following call can supply it
@@ -526,31 +570,116 @@ void DLNARenderer::handleAVTransportControl() {
     httpServer->send(200, "text/xml; charset=\"utf-8\"", response);
 }
 
-void DLNARenderer::handleRenderingControl() {
+void DLNARenderer::handleConnectionManagerControl() {
     String soapAction = httpServer->header("SOAPACTION");
-    String body = httpServer->arg("plain");
     int hashPos = soapAction.lastIndexOf('#');
     String actionName = (hashPos != -1) ? soapAction.substring(hashPos + 1) : "Unknown";
     actionName.replace("\"", "");
 
     String actionResult = "";
 
-    if (actionName == "GetVolume") {
-        actionResult = "<CurrentVolume>" + String(audioOutput.getVolume()) + "</CurrentVolume>";
-    } else if (actionName == "SetVolume") {
-        int vol = -1;
-        // Check named argument first
-        if (httpServer->hasArg("DesiredVolume")) {
-            vol = httpServer->arg("DesiredVolume").toInt();
-        } else {
-            // Parse from body
-            int start = body.indexOf("<DesiredVolume>") + 15;
-            int end = body.indexOf("</DesiredVolume>", start);
-            if (start > 14 && end > start) {
-                vol = body.substring(start, end).toInt();
+    if (actionName == "GetProtocolInfo") {
+        // Tell VLC we support MP3, AAC, FLAC, and WAV
+        String protocolInfo = "http-get:*:audio/mpeg:*,http-get:*:audio/aac:*,http-get:*:audio/flac:*,http-get:*:audio/wav:*";
+        actionResult = "<Source></Source>";
+        actionResult += "<Sink>" + protocolInfo + "</Sink>";
+    } else if (actionName == "GetCurrentConnectionIDs") {
+        actionResult = "<ConnectionIDs>0</ConnectionIDs>";
+    } else if (actionName == "GetCurrentConnectionInfo") {
+        actionResult = "<RcsID>-1</RcsID><AVTransportID>-1</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Input</Direction><Status>OK</Status>";
+    }
+
+    String response = "<?xml version=\"1.0\"?>";
+    response += "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">";
+    response += "<s:Body>";
+    response += "<u:" + actionName + "Response xmlns:u=\"urn:schemas-upnp-org:service:ConnectionManager:1\">";
+    response += actionResult;
+    response += "</u:" + actionName + "Response>";
+    response += "</s:Body>";
+    response += "</s:Envelope>";
+
+    httpServer->send(200, "text/xml; charset=\"utf-8\"", response);
+}
+
+void DLNARenderer::handleRenderingControl() {
+    // High-priority entry log to verify the endpoint is hit
+    Serial.println("[DLNA] Incoming RenderingControl request");
+    String soapAction = httpServer->header("SOAPACTION");
+    Serial.printf("[DLNA] SOAPACTION: %s\n", soapAction.c_str());
+
+    // Retrieve the SOAP body robustly to handle complex XML structures from apps like BubbleUPnP
+    String body = "";
+    if (httpServer->hasArg("plain")) {
+        body = httpServer->arg("plain");
+    } else if (httpServer->args() > 0) {
+        body = httpServer->arg(0);
+    }
+
+    // Handle potential fragmented body reads if Content-Length is larger than currently buffered data
+    String contentLenStr = httpServer->header("Content-Length");
+    if (contentLenStr.length() > 0) {
+        int expected = contentLenStr.toInt();
+        if (expected > body.length()) {
+            WiFiClient client = httpServer->client();
+            unsigned long start = millis();
+            while ((int)body.length() < expected && millis() - start < 2000) {
+                while (client.available() > 0 && (int)body.length() < expected) {
+                    char c = client.read();
+                    body += c;
+                }
+                delay(1);
             }
         }
-        if (vol >= 0) audioOutput.setVolume(vol);
+    }
+
+    int hashPos = soapAction.lastIndexOf('#');
+    String actionName = (hashPos != -1) ? soapAction.substring(hashPos + 1) : "Unknown";
+    actionName.replace("\"", "");
+    actionName.trim();
+
+    String actionResult = "";
+
+    if (actionName == "GetVolume") {
+        actionResult = "<CurrentVolume>" + String(audioOutput.getVolume()) + "</CurrentVolume>";
+    } else if (actionName == "GetMute") {
+        actionResult = "<CurrentMute>0</CurrentMute>";
+    } else if (actionName.equalsIgnoreCase("SetMute")) {
+        // Just acknowledge the mute command to stay compatible
+        actionResult = "";
+        Serial.println("[DLNA] SetMute request received (Dummy handling)");
+    } else if (actionName.equalsIgnoreCase("SetVolume")) {
+        Serial.println("[DLNA] Identified SetVolume action");
+        
+        int vol = -1;
+        // 1. Check named argument first
+        if (httpServer->hasArg("DesiredVolume")) {
+            vol = httpServer->arg("DesiredVolume").toInt();
+        } else if (httpServer->hasArg("u:DesiredVolume")) {
+            vol = httpServer->arg("u:DesiredVolume").toInt();
+        }
+        
+        // 2. Aggressive body parsing for DesiredVolume (handles namespaces like <u:DesiredVolume>)
+        // Look for the value between the first '>' and the following '<' after "DesiredVolume"
+        if (vol == -1) {
+            int tagPos = body.indexOf("DesiredVolume");
+            if (tagPos != -1) {
+                int startBracket = body.indexOf('>', tagPos);
+                int endBracket = body.indexOf('<', startBracket != -1 ? startBracket : tagPos);
+                
+                if (startBracket != -1 && endBracket != -1 && endBracket > startBracket) {
+                    String val = body.substring(startBracket + 1, endBracket);
+                    val.trim();
+                    vol = val.toInt();
+                }
+            }
+        }
+
+        if (vol >= 0 && vol <= 100) {
+            audioOutput.setVolume((uint8_t)vol);
+            Serial.printf("[DLNA] Volume successfully changed to %d%% via SOAP\n", vol);
+        } else {
+            Serial.printf("[DLNA] Could not parse volume value from SOAP body. Action: %s\n", actionName.c_str());
+        }
     }
 
     Serial.printf("[SOAP] RenderingControl Action: %s\n", actionName.c_str());
@@ -569,12 +698,23 @@ void DLNARenderer::handleRenderingControl() {
 
 void DLNARenderer::handleAVTransportSCPD() {
     String xml = generateAVTransportSCPD();
-    httpServer->send(200, "text/xml", xml);
+    httpServer->sendHeader("Server", "FreeRTOS/10.0 UPnP/1.1 ESP32-Speaker/1.0");
+    httpServer->send(200, "text/xml; charset=\"utf-8\"", xml);
+    Serial.println("[HTTP] Sent AVTransport SCPD");
 }
 
 void DLNARenderer::handleRenderingControlSCPD() {
     String xml = generateRenderingControlSCPD();
-    httpServer->send(200, "text/xml", xml);
+    httpServer->sendHeader("Server", "FreeRTOS/10.0 UPnP/1.1 ESP32-Speaker/1.0");
+    httpServer->send(200, "text/xml; charset=\"utf-8\"", xml);
+    Serial.println("[HTTP] Sent RenderingControl SCPD");
+}
+
+void DLNARenderer::handleConnectionManagerSCPD() {
+    String xml = generateConnectionManagerSCPD();
+    httpServer->sendHeader("Server", "FreeRTOS/10.0 UPnP/1.1 ESP32-Speaker/1.0");
+    httpServer->send(200, "text/xml; charset=\"utf-8\"", xml);
+    Serial.println("[HTTP] Sent ConnectionManager SCPD");
 }
 
 String DLNARenderer::generateDeviceDescription() {
@@ -590,12 +730,22 @@ String DLNARenderer::generateDeviceDescription() {
     xml += "    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>\n";
     xml += "    <friendlyName>" + deviceName + "</friendlyName>\n";
     xml += "    <manufacturer>Espressif</manufacturer>\n";
-    xml += "    <manufacturerURL>https://www.espressif.com</manufacturerURL>\n";
-    xml += "    <modelDescription>ESP32 DLNA/UPnP Media Renderer</modelDescription>\n";
+    xml += "    <manufacturerURL>https://www.espressif.com</manufacturerURL>\n"; // Can be dynamic
+    xml += "    <modelDescription>" + deviceModel + " DLNA/UPnP Media Renderer</modelDescription>\n";
     xml += "    <modelName>" + deviceModel + "</modelName>\n";
     xml += "    <modelNumber>1.0</modelNumber>\n";
     xml += "    <serialNumber>" + WiFi.macAddress() + "</serialNumber>\n";
     xml += "    <UDN>" + deviceUUID + "</UDN>\n";
+    xml += "    <presentationURL>http://" + localIP + "/</presentationURL>\n";
+    xml += "    <iconList>\n";
+    xml += "      <icon>\n";
+    xml += "        <mimetype>image/png</mimetype>\n";
+    xml += "        <width>48</width>\n";
+    xml += "        <height>48</height>\n";
+    xml += "        <depth>24</depth>\n";
+    xml += "        <url>/icon48.png</url>\n";
+    xml += "      </icon>\n";
+    xml += "    </iconList>\n";
     xml += "    <serviceList>\n";
     xml += "      <service>\n";
     xml += "        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>\n";
@@ -611,6 +761,13 @@ String DLNARenderer::generateDeviceDescription() {
     xml += "        <eventSubURL>/rc/event</eventSubURL>\n";
     xml += "        <SCPDURL>/rc/scpd.xml</SCPDURL>\n";
     xml += "      </service>\n";
+      xml += "      <service>\n";
+      xml += "        <serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>\n";
+      xml += "        <serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>\n";
+      xml += "        <controlURL>/cm/control</controlURL>\n";
+      xml += "        <eventSubURL>/cm/event</eventSubURL>\n";
+      xml += "        <SCPDURL>/cm/scpd.xml</SCPDURL>\n";
+      xml += "      </service>\n";
     xml += "    </serviceList>\n";
     xml += "  </device>\n";
     xml += "</root>";
@@ -631,11 +788,46 @@ String DLNARenderer::generateAVTransportSCPD() {
     xml += "        <argument><name>CurrentURIMetaData</name><direction>in</direction><relatedStateVariable>AVTransportURIMetaData</relatedStateVariable></argument>\n";
     xml += "      </argumentList>\n";
     xml += "    </action>\n";
-    xml += "    <action><name>Play</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Speed</name><direction>in</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument></argumentList></action>\n";
-    xml += "    <action><name>Stop</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>\n";
-    xml += "    <action><name>Pause</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument></argumentList></action>\n";
-    xml += "    <action><name>GetTransportInfo</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>CurrentTransportState</name><direction>out</direction><relatedStateVariable>TransportState</relatedStateVariable></argument><argument><name>CurrentTransportStatus</name><direction>out</direction><relatedStateVariable>TransportStatus</relatedStateVariable></argument><argument><name>CurrentSpeed</name><direction>out</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument></argumentList></action>\n";
-    xml += "    <action><name>GetPositionInfo</name><argumentList><argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument><argument><name>Track</name><direction>out</direction><relatedStateVariable>CurrentTrack</relatedStateVariable></argument><argument><name>TrackDuration</name><direction>out</direction><relatedStateVariable>CurrentTrackDuration</relatedStateVariable></argument><argument><name>TrackMetaData</name><direction>out</direction><relatedStateVariable>CurrentTrackMetaData</relatedStateVariable></argument><argument><name>TrackURI</name><direction>out</direction><relatedStateVariable>CurrentTrackURI</relatedStateVariable></argument><argument><name>RelTime</name><direction>out</direction><relatedStateVariable>RelativeTimePosition</relatedStateVariable></argument><argument><name>AbsTime</name><direction>out</direction><relatedStateVariable>AbsoluteTimePosition</relatedStateVariable></argument></argumentList></action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>Play</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>Speed</name><direction>in</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>Stop</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>Pause</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>GetTransportInfo</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>CurrentTransportState</name><direction>out</direction><relatedStateVariable>TransportState</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>CurrentTransportStatus</name><direction>out</direction><relatedStateVariable>TransportStatus</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>CurrentSpeed</name><direction>out</direction><relatedStateVariable>TransportPlaySpeed</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>GetPositionInfo</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>Track</name><direction>out</direction><relatedStateVariable>CurrentTrack</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>TrackDuration</name><direction>out</direction><relatedStateVariable>CurrentTrackDuration</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>TrackMetaData</name><direction>out</direction><relatedStateVariable>CurrentTrackMetaData</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>TrackURI</name><direction>out</direction><relatedStateVariable>CurrentTrackURI</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>RelTime</name><direction>out</direction><relatedStateVariable>RelativeTimePosition</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>AbsTime</name><direction>out</direction><relatedStateVariable>AbsoluteTimePosition</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
     xml += "  </actionList>\n";
     xml += "  <serviceStateTable>\n";
     xml += "    <stateVariable sendEvents=\"yes\">\n";
@@ -673,7 +865,10 @@ String DLNARenderer::generateAVTransportSCPD() {
 String DLNARenderer::generateRenderingControlSCPD() {
     String xml = "<?xml version=\"1.0\"?>\n";
     xml += "<scpd xmlns=\"urn:schemas-upnp-org:service-1-0\">\n";
-    xml += "  <specVersion><major>1</major><minor>0</minor></specVersion>\n";
+    xml += "  <specVersion>\n";
+    xml += "    <major>1</major>\n";
+    xml += "    <minor>0</minor>\n";
+    xml += "  </specVersion>\n";
     xml += "  <actionList>\n";
     xml += "    <action>\n";
     xml += "      <name>GetVolume</name>\n";
@@ -691,11 +886,52 @@ String DLNARenderer::generateRenderingControlSCPD() {
     xml += "        <argument><name>DesiredVolume</name><direction>in</direction><relatedStateVariable>Volume</relatedStateVariable></argument>\n";
     xml += "      </argumentList>\n";
     xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>GetMute</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>CurrentMute</name><direction>out</direction><relatedStateVariable>Mute</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "    <action>\n";
+    xml += "      <name>SetMute</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>DesiredMute</name><direction>in</direction><relatedStateVariable>Mute</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
     xml += "  </actionList>\n";
     xml += "  <serviceStateTable>\n";
+    xml += "    <stateVariable sendEvents=\"yes\"><name>LastChange</name><dataType>string</dataType></stateVariable>\n";
     xml += "    <stateVariable sendEvents=\"yes\"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange></stateVariable>\n";
+    xml += "    <stateVariable sendEvents=\"yes\"><name>Mute</name><dataType>boolean</dataType></stateVariable>\n";
     xml += "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType><allowedValueList><allowedValue>Master</allowedValue></allowedValueList></stateVariable>\n";
     xml += "    <stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>\n";
+    xml += "  </serviceStateTable>\n";
+    xml += "</scpd>\n";
+
+    return xml;
+}
+
+String DLNARenderer::generateConnectionManagerSCPD() {
+    String xml = "<?xml version=\"1.0\"?>\n";
+    xml += "<scpd xmlns=\"urn:schemas-upnp-org:service-1-0\">\n";
+    xml += "  <specVersion><major>1</major><minor>0</minor></specVersion>\n";
+    xml += "  <actionList>\n";
+    xml += "    <action>\n";
+    xml += "      <name>GetProtocolInfo</name>\n";
+    xml += "      <argumentList>\n";
+    xml += "        <argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument>\n";
+    xml += "        <argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument>\n";
+    xml += "      </argumentList>\n";
+    xml += "    </action>\n";
+    xml += "  </actionList>\n";
+    xml += "  <serviceStateTable>\n";
+    xml += "    <stateVariable sendEvents=\"yes\"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>\n";
+    xml += "    <stateVariable sendEvents=\"yes\"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>\n";
+    xml += "    <stateVariable sendEvents=\"no\"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>\n";
     xml += "  </serviceStateTable>\n";
     xml += "</scpd>";
 
@@ -731,12 +967,25 @@ String DLNARenderer::extractURIFromRequest(const String& body) {
     String tmp = body;
     // Try multiple rounds of unescaping entities to penetrate nested XML (like Metadata)
     for (int pass = 0; pass < 3; pass++) {
-        const char* tags[] = {"CurrentURI", "NextURI", "URI", "URL", "res"};
+        // Expanded tag list: 'res' is common for URIs inside Metadata blocks
+        const char* tags[] = {"CurrentURI", "NextURI", "res", "URI", "URL", "val"};
         for (auto t : tags) {
             int pos = tmp.indexOf(t);
-            if (pos == -1) continue;
+            // Use case-insensitive check and ensure we don't accidentally match parts of other tags
+            if (pos == -1) {
+                String lowerT = String(t);
+                lowerT.toLowerCase();
+                pos = tmp.indexOf(lowerT);
+            }
+            if (pos == -1) {
+                String upperT = String(t);
+                upperT.toUpperCase();
+                pos = tmp.indexOf(upperT);
+            }
             
-            int openEnd = tmp.indexOf('>', pos); // End of opening tag
+            if (pos == -1) continue;
+
+            int openEnd = tmp.indexOf('>', pos); 
             int closeStart = -1;
             if (openEnd != -1) closeStart = tmp.indexOf("</", openEnd);
             

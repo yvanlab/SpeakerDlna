@@ -38,6 +38,7 @@ private:
 
     bool initialized;
     unsigned long lastSSDPAnnounce;
+    uint32_t bootId;
 
     void handleSSDP();
     void sendSSDPResponse(IPAddress remoteIP, uint16_t remotePort, const char* searchTarget);
@@ -47,9 +48,11 @@ private:
     void handleDescription();
     void handleEventSubscription();
     void handleAVTransportControl();
+    void handleConnectionManagerControl();
     void handleRenderingControl();
     void handleAVTransportSCPD();
     void handleRenderingControlSCPD();
+    void handleConnectionManagerSCPD();
 
     // Attempt to extract a URI from the current HTTP request (headers/args/body)
     String extractURIFromRequest(const String& body);
@@ -57,6 +60,7 @@ private:
     String generateDeviceDescription();
     String generateAVTransportSCPD();
     String generateRenderingControlSCPD();
+    String generateConnectionManagerSCPD();
 };
 
 #endif // DLNA_RENDERER_H

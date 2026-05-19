@@ -34,9 +34,9 @@ bool ConfigManager::loadDefaults() {
     // Audio defaults
     audioConfig.sample_rate = 44100;
     audioConfig.bits_per_sample = 16;
-    audioConfig.i2s_bclk_pin = 26;
-    audioConfig.i2s_lrc_pin = 25;
-    audioConfig.i2s_dout_pin = 22;
+    audioConfig.i2s_bclk_pin = 26; // Default I2S BCLK pin, compatible with PCM5102A
+    audioConfig.i2s_lrc_pin = 25;  // Default I2S LRC (WS) pin, compatible with PCM5102A
+    audioConfig.i2s_dout_pin = 22; // Default I2S Data Out pin, compatible with PCM5102A
     audioConfig.default_volume = 50;
 
     // Protocol defaults

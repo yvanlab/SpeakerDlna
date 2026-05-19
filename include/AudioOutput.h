@@ -26,7 +26,7 @@ public:
 
 private:
     bool initialized;
-    uint8_t currentVolume;
+    volatile uint8_t currentVolume;
 
     static constexpr i2s_port_t I2S_NUM = I2S_NUM_0;
 };

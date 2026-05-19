@@ -67,7 +67,7 @@ void AudioStreamer::loop() {
     }
 
     // Process audio stream
-    if (state == STREAM_PLAYING && audioDecoder) {
+    if (state == STREAM_PLAYING && audioDecoder && audioSource) {
         if (audioDecoder->isRunning()) {
             if (!audioDecoder->loop()) {
                 // Decode error or end of stream
@@ -117,7 +117,7 @@ bool AudioStreamer::startStream(const String& url) {
 
     // Allocate a small buffer for the ESP32-C3 (modest size to save RAM)
     // This allows the decoder to stay fed during minor WiFi fluctuations
-    audioSource = new AudioFileSourceBuffer(httpSrc, 32768); // Increased to 32KB for stability
+    audioSource = new AudioFileSourceBuffer(httpSrc, 65536); // Increased to 64KB for better DLNA stability
 
     // Detect format from URL and create appropriate decoder
     String urlLower = url;

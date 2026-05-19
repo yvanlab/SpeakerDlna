@@ -23,23 +23,14 @@ bool I2SAudioOutput::begin(const AudioConfig& config) {
         .sample_rate = (uint32_t)config.sample_rate,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_MSB, // Required for Internal DAC
+        .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 1024,
-        .use_apll = true,
+        .dma_buf_count = 32,    // More buffers to prevent stutter
+        .dma_buf_len = 128,     // Smaller chunks for better timing
+        .use_apll = false,     // Disable APLL for higher initial compatibility
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
     };
-
-    // Enable internal DAC mode if pins are set to 25/26 (Standard ESP32 only)
-#if !defined(CONFIG_IDF_TARGET_ESP32C3)
-    // Force Internal DAC mode if specific pins are used
-    if (config.i2s_bclk_pin == 26 || config.i2s_lrc_pin == 25) {
-        i2s_config.mode = (i2s_mode_t)(i2s_config.mode | I2S_MODE_DAC_BUILT_IN);
-    }
-#endif
-
     esp_err_t err = i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
     if (err != ESP_OK) {
         Serial.printf("Failed to install I2S driver: %d\n", err);
