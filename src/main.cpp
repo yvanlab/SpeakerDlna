@@ -14,16 +14,8 @@
 #include "BluetoothSpeaker.h"
 #include "DLNARenderer.h"
 #include "HEOSPlayer.h"
-
-// Redundant definitions from config.h to address "not declared in this scope" errors.
-// This is likely a build system issue (e.g., stale cache or incorrect include paths)
-// as config.h is already included. This is a workaround to allow compilation.
-#define TEST_SINE_FREQ    1000.0f // 1kHz is much easier to hear for testing
-#define TEST_SINE_VOLUME  0.90f   // Near-maximum volume for testing
-#define TEST_FM_MOD_FREQ  5.0f    // Speed of frequency change (Hz)
-#define TEST_FM_DEVIATION 50.0f   // Range of frequency swing (Hz)
-#define TEST_DURATION_MS  5000    // Duration of test in milliseconds
-#define SAMPLE_RATE     44100   // Also from config.h
+#include "config.h"
+#include "constants.h"
 
 // Global objects
 ConfigManager configManager;
@@ -72,10 +64,11 @@ void setupWiFi(const WiFiConfig& wifiConfig) {
 void printStatus() {
     Serial.println("\n=== Status ===");
 
-    // WiFi status
+    // WiFi status - use stack-allocated buffer to avoid heap fragmentation
     if (wifiConnected && WiFi.status() == WL_CONNECTED) {
-        Serial.printf("WiFi: Connected (%d dBm) - %s\n",
-            WiFi.RSSI(), WiFi.localIP().toString().c_str());
+        char ipBuf[IP_STRING_BUFFER_SIZE];
+        WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+        Serial.printf("WiFi: Connected (%d dBm) - %s\n", WiFi.RSSI(), ipBuf);
     } else {
         Serial.println("WiFi: Disconnected");
     }
@@ -185,8 +178,8 @@ void setup() {
     
     // Initialize WiFi
     setupWiFi(wifiConfig);
-    
-    delay(5000);
+
+    delay(STARTUP_DELAY_MS);
 
     // Initialize Audio Output (I2S)
     Serial.println("\n=== Audio Output Initialization ===");
@@ -216,16 +209,16 @@ void setup() {
     }
 
     // Start the background audio task on Core 1 (Application core)
-    // Priority 5 is higher than the main loop (1) but allows system tasks to run.
-    // Core 1 is used for application tasks, leaving Core 0 for WiFi/Bluetooth.
+    // Higher priority than main loop but allows system tasks to run
+    // Core 1 is used for application tasks, leaving Core 0 for WiFi/Bluetooth
     xTaskCreatePinnedToCore(
-        audioTask,        // Function to run
-        "AudioTask",      // Name
-        8192,             // Stack size (bytes)
-        NULL,             // Parameter to pass to function
-        5,                // Priority (0 to configMAX_PRIORITIES - 1)
-        &audioTaskHandle, // Task handle
-        1                 // Core 1
+        audioTask,              // Function to run
+        "AudioTask",            // Name
+        AUDIO_TASK_STACK_SIZE,  // Stack size (bytes)
+        NULL,                   // Parameter to pass to function
+        AUDIO_TASK_PRIORITY,    // Priority (0 to configMAX_PRIORITIES - 1)
+        &audioTaskHandle,       // Task handle
+        AUDIO_TASK_CORE         // Core 1
     );
 
 
@@ -319,11 +312,11 @@ void loop() {
     if (wifiConnected && WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi connection lost! Reconnecting...");
         WiFi.reconnect();
-        delay(5000);
+        delay(WIFI_RECONNECT_DELAY_MS);
     }
 
-    // Print status every 30 seconds
-    if (millis() - lastStatusPrint > 30000) {
+    // Print status periodically
+    if (millis() - lastStatusPrint > STATUS_PRINT_INTERVAL_MS) {
         printStatus();
         lastStatusPrint = millis();
     }

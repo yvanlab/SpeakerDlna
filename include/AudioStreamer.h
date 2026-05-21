@@ -26,6 +26,9 @@ enum StreamState {
     STREAM_ERROR
 };
 
+// Forward declaration of bridge class
+class AudioOutputBridge;
+
 class AudioStreamer {
 public:
     AudioStreamer(I2SAudioOutput& audioOut);
@@ -61,8 +64,8 @@ public:
 private:
     I2SAudioOutput& audioOutput;
     AudioFileSource* audioSource;
-    AudioGenerator* audioDecoder; // Changed to base class
-    AudioOutput* audioOutputDestination; // Renamed and changed type to base class
+    AudioGenerator* audioDecoder;
+    AudioOutputBridge* audioOutputBridge;  // Concrete type to avoid unsafe casting
 
     StreamState state;
     String currentURL;
@@ -74,6 +77,7 @@ private:
     unsigned long lastUpdate;
 
     void setState(StreamState newState);
+    void cleanupResources();  // Centralized cleanup for error paths
 };
 
 #endif // AUDIO_STREAMER_H

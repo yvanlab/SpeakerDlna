@@ -4,6 +4,7 @@
 
 #include "AudioStreamer.h"
 #include "config.h"
+#include "constants.h"
 
 // Bridge to route library samples through our custom I2SAudioOutput (DAC)
 class AudioOutputBridge : public AudioOutput {
@@ -23,7 +24,7 @@ public:
 };
 
 AudioStreamer::AudioStreamer(I2SAudioOutput& audioOut)
-    : audioOutput(audioOut), audioSource(nullptr), audioDecoder(nullptr), audioOutputDestination(nullptr),
+    : audioOutput(audioOut), audioSource(nullptr), audioDecoder(nullptr), audioOutputBridge(nullptr),
       state(STREAM_STOPPED), initialized(false), lastUpdate(0) {
 }
 
@@ -38,9 +39,12 @@ bool AudioStreamer::begin() {
 
     Serial.println("Initializing Audio Streamer (MP3 support)...");
 
-    // Use bridge as a generic AudioOutput. The decoder only needs the base AudioOutput interface.
-    // This avoids unsafe casting issues and ensures correct polymorphism.
-    audioOutputDestination = new AudioOutputBridge(audioOutput);
+    // Create bridge to route samples through our custom I2SAudioOutput
+    audioOutputBridge = new AudioOutputBridge(audioOutput);
+    if (!audioOutputBridge) {
+        Serial.println("Failed to allocate audio output bridge");
+        return false;
+    }
 
     initialized = true;
     state = STREAM_STOPPED;
@@ -52,13 +56,30 @@ bool AudioStreamer::begin() {
 void AudioStreamer::end() {
     stopStream();
 
-    if (audioOutputDestination) {
-        delete audioOutputDestination;
-        audioOutputDestination = nullptr;
+    if (audioOutputBridge) {
+        delete audioOutputBridge;
+        audioOutputBridge = nullptr;
     }
 
     initialized = false;
     Serial.println("Audio Streamer stopped");
+}
+
+void AudioStreamer::cleanupResources() {
+    // Centralized cleanup to prevent resource leaks in error paths
+    if (audioDecoder) {
+        audioDecoder->stop();
+        delete audioDecoder;
+        audioDecoder = nullptr;
+    }
+
+    audioOutput.flush();
+
+    if (audioSource) {
+        audioSource->close();
+        delete audioSource;
+        audioSource = nullptr;
+    }
 }
 
 void AudioStreamer::loop() {
@@ -88,36 +109,53 @@ bool AudioStreamer::startStream(const String& url) {
         return false;
     }
 
+    // Input validation (security)
+    if (url.length() == 0 || url.length() > MAX_URL_LENGTH) {
+        Serial.printf("Invalid URL length: %d\n", url.length());
+        return false;
+    }
+
     Serial.printf("Starting stream: %s\n", url.c_str());
 
     // Stop current stream if playing
     if (state != STREAM_STOPPED) {
         stopStream();
-        delay(100);
+        delay(STREAM_STOP_DELAY_MS);
     }
 
     currentURL = url;
     setState(STREAM_CONNECTING);
 
     // Reset sample counter for accurate time tracking
-    if (audioOutputDestination) {
-        static_cast<AudioOutputBridge*>(audioOutputDestination)->resetSamples();
+    if (audioOutputBridge) {
+        audioOutputBridge->resetSamples();
     }
 
     Serial.printf("Connecting to stream URL: %s\n", url.c_str());
 
-    // Create HTTP source and add a buffer to handle network jitter
+    // Create HTTP source
     AudioFileSourceHTTPStream* httpSrc = new AudioFileSourceHTTPStream();
-    if (!httpSrc->open(url.c_str())) {
-        Serial.println("Failed to open HTTP stream");
-        delete httpSrc;
+    if (!httpSrc) {
+        Serial.println("Failed to allocate HTTP source");
         setState(STREAM_ERROR);
         return false;
     }
 
-    // Allocate a small buffer for the ESP32-C3 (modest size to save RAM)
-    // This allows the decoder to stay fed during minor WiFi fluctuations
-    audioSource = new AudioFileSourceBuffer(httpSrc, 65536); // Increased to 64KB for better DLNA stability
+    if (!httpSrc->open(url.c_str())) {
+        Serial.println("Failed to open HTTP stream");
+        delete httpSrc;  // Clean up before returning
+        setState(STREAM_ERROR);
+        return false;
+    }
+
+    // Wrap HTTP source in buffer to handle network jitter
+    audioSource = new AudioFileSourceBuffer(httpSrc, STREAM_BUFFER_SIZE);
+    if (!audioSource) {
+        Serial.println("Failed to allocate stream buffer");
+        delete httpSrc;  // Clean up HTTP source
+        setState(STREAM_ERROR);
+        return false;
+    }
 
     // Detect format from URL and create appropriate decoder
     String urlLower = url;
@@ -137,11 +175,18 @@ bool AudioStreamer::startStream(const String& url) {
         Serial.println("Using MP3 decoder (default)");
         audioDecoder = new AudioGeneratorMP3();
     }
-    
-    // Note: audioI2SOutput is used as the destination
-    if (!audioDecoder->begin(audioSource, audioOutputDestination)) {
+
+    if (!audioDecoder) {
+        Serial.println("Failed to allocate decoder");
+        cleanupResources();  // Clean up all resources
+        setState(STREAM_ERROR);
+        return false;
+    }
+
+    // Start decoder with source and output bridge
+    if (!audioDecoder->begin(audioSource, audioOutputBridge)) {
         Serial.println("Failed to start decoder");
-        stopStream();
+        cleanupResources();  // Clean up all resources
         setState(STREAM_ERROR);
         return false;
     }
@@ -152,20 +197,7 @@ bool AudioStreamer::startStream(const String& url) {
 }
 
 void AudioStreamer::stopStream() {
-    if (audioDecoder) {
-        audioDecoder->stop();
-        delete audioDecoder;
-        audioDecoder = nullptr;
-    }
-    
-    // Explicitly clear the hardware buffer to stop sound immediately
-    audioOutput.flush();
-
-    if (audioSource) {
-        audioSource->close();
-        delete audioSource;
-        audioSource = nullptr;
-    }
+    cleanupResources();
 
     currentURL = "";
     trackTitle = "";
@@ -177,9 +209,9 @@ void AudioStreamer::stopStream() {
 }
 
 uint32_t AudioStreamer::getAudioPos() {
-    if (state == STREAM_PLAYING && audioOutputDestination) {
+    if (state == STREAM_PLAYING && audioOutputBridge) {
         // Convert samples to milliseconds: (samples / 44100) * 1000
-        return static_cast<AudioOutputBridge*>(audioOutputDestination)->getSamplesPlayed() / 44.1f;
+        return audioOutputBridge->getSamplesPlayed() / SAMPLES_TO_MS_DIVISOR;
     }
     return 0;
 }

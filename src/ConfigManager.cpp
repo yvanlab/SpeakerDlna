@@ -3,6 +3,16 @@
  */
 
 #include "ConfigManager.h"
+#include "constants.h"
+
+// Helper function to validate and truncate strings (security)
+static String validateString(const String& input, size_t maxLength, const char* fieldName) {
+    if (input.length() > maxLength) {
+        Serial.printf("WARNING: %s exceeds max length (%d), truncating\n", fieldName, maxLength);
+        return input.substring(0, maxLength);
+    }
+    return input;
+}
 
 ConfigManager::ConfigManager() {
     loadDefaults();
@@ -75,21 +85,29 @@ bool ConfigManager::loadConfig() {
         return false;
     }
 
-    // Parse WiFi config
+    // Parse WiFi config with validation
     if (doc["wifi"].is<JsonObject>()) {
         JsonObject wifi = doc["wifi"];
-        wifiConfig.ssid = wifi["ssid"] | wifiConfig.ssid;
-        wifiConfig.password = wifi["password"] | wifiConfig.password;
-        wifiConfig.hostname = wifi["hostname"] | wifiConfig.hostname;
+        String rawSsid = wifi["ssid"] | wifiConfig.ssid;
+        String rawPassword = wifi["password"] | wifiConfig.password;
+        String rawHostname = wifi["hostname"] | wifiConfig.hostname;
+
+        wifiConfig.ssid = validateString(rawSsid, MAX_SSID_LENGTH, "SSID");
+        wifiConfig.password = validateString(rawPassword, MAX_PASSWORD_LENGTH, "Password");
+        wifiConfig.hostname = validateString(rawHostname, MAX_DEVICE_NAME_LENGTH, "Hostname");
         wifiConfig.timeout_ms = wifi["timeout_ms"] | wifiConfig.timeout_ms;
     }
 
-    // Parse device config
+    // Parse device config with validation
     if (doc["device"].is<JsonObject>()) {
         JsonObject device = doc["device"];
-        deviceConfig.name = device["name"] | deviceConfig.name;
-        deviceConfig.model = device["model"] | deviceConfig.model;
-        deviceConfig.location = device["location"] | deviceConfig.location;
+        String rawName = device["name"] | deviceConfig.name;
+        String rawModel = device["model"] | deviceConfig.model;
+        String rawLocation = device["location"] | deviceConfig.location;
+
+        deviceConfig.name = validateString(rawName, MAX_DEVICE_NAME_LENGTH, "Device Name");
+        deviceConfig.model = validateString(rawModel, MAX_DEVICE_NAME_LENGTH, "Device Model");
+        deviceConfig.location = validateString(rawLocation, MAX_DEVICE_NAME_LENGTH, "Device Location");
     }
 
     // Parse audio config

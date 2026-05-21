@@ -33,8 +33,11 @@ private:
     String deviceModel;
     String deviceUUID;
     String currentURI;
+    String currentURIMetadata;
     uint16_t serverPort;
     bool awaitingURI;
+    bool isMuted;
+    uint8_t lastVolume;  // Store volume before mute
 
     bool initialized;
     unsigned long lastSSDPAnnounce;
